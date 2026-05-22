@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+body {
+  margin: 0;
+}
+
+html[data-theme='light'] body {
+  background: #f4f4f5;
+  color: #18181b;
+}
+
+html[data-theme='light'] .bg-black {
+  background-color: #f4f4f5;
+}
+
+html[data-theme='light'] .bg-zinc-900,
+html[data-theme='light'] .bg-zinc-900\/60,
+html[data-theme='light'] .bg-zinc-900\/80 {
+  background-color: rgb(255 255 255 / 0.92);
+}
+
+html[data-theme='light'] .bg-zinc-800,
+html[data-theme='light'] .bg-zinc-800\/40,
+html[data-theme='light'] .bg-zinc-800\/50,
+html[data-theme='light'] .bg-zinc-800\/60 {
+  background-color: rgb(244 244 245 / 0.9);
+}
+
+html[data-theme='light'] .border-zinc-800,
+html[data-theme='light'] .border-zinc-800\/50,
+html[data-theme='light'] .border-zinc-800\/60,
+html[data-theme='light'] .border-zinc-800\/80 {
+  border-color: #d4d4d8;
+}
+
+html[data-theme='light'] .border-zinc-700 {
+  border-color: #d4d4d8;
+}
+
+html[data-theme='light'] .text-white,
+html[data-theme='light'] .text-zinc-100,
+html[data-theme='light'] .text-zinc-200,
+html[data-theme='light'] .text-zinc-300 {
+  color: #18181b;
+}
+
+html[data-theme='light'] .text-zinc-400,
+html[data-theme='light'] .text-zinc-500 {
+  color: #52525b;
+}
+
+html[data-theme='light'] .text-zinc-600,
+html[data-theme='light'] .text-zinc-700 {
+  color: #71717a;
+}
+
+html[data-theme='light'] input,
+html[data-theme='light'] textarea,
+html[data-theme='light'] select {
+  color: #18181b;
+}
