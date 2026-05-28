@@ -1,373 +1,742 @@
-# RAG (Retrieval-Augmented Generation) System
+# RAG Platform
 
-A modular, production-ready Retrieval-Augmented Generation (RAG) platform built with Python/FastAPI backend and React/Vite frontend. Enables users to upload documents, chat with their content using LLMs, and get accurate, citation-backed answers.
+A full-stack Retrieval-Augmented Generation platform for uploading PDFs, indexing their content, and chatting with grounded answers from your own documents. The project combines a FastAPI backend, a React/Vite frontend, Supabase for user data and metadata, Ollama for local LLM and embedding calls, ChromaDB or FAISS for vector search, and Redis/Celery for background document processing.
+
+This README was generated from the current project structure and implementation, not from a template.
 
 ## Table of Contents
-- [Overview](#overview)
-- [Features](#features)
-- [Architecture](#architecture)
+
+- [What This Project Does](#what-this-project-does)
+- [Current Architecture](#current-architecture)
+- [Main Data Flows](#main-data-flows)
 - [Technology Stack](#technology-stack)
+- [Project Structure](#project-structure)
+- [Backend Details](#backend-details)
+- [Frontend Details](#frontend-details)
 - [Configuration](#configuration)
-- [Core Components & Values](#core-components--values)
-  - [Embedding Model](#embedding-model)
-  - [LLM & Generation Settings](#llm--generation-settings)
-  - [Chunking Strategy](#chunking-strategy)
-  - [Retrieval Settings](#retrieval-settings)
-  - [Threshold & Top‑K](#threshold--top-k)
-- [Setup & Installation](#setup--installation)
-- [Running the Application](#running-the-application)
-- [API Endpoints](#api-endpoints)
-- [Frontend Usage](#frontend-usage)
+- [Setup](#setup)
+- [Running Locally](#running-locally)
+- [API Reference](#api-reference)
+- [Database and Persistence](#database-and-persistence)
+- [RAG Pipeline Details](#rag-pipeline-details)
+- [Async Processing](#async-processing)
 - [Testing](#testing)
-- [Deployment](#deployment)
+- [Known Caveats](#known-caveats)
 - [Troubleshooting](#troubleshooting)
-- [License](#license)
 
----
+## What This Project Does
 
-## Overview
-The RAG system allows users to:
-- Upload PDF/DOCX documents
-- Automatically extract text, chunk it, generate embeddings, and store them in a vector database (ChromaDB)
-- Chat with the uploaded documents using an LLM (Ollama) with retrieval‑augmented generation
-- View citations and source documents for each answer
-- Manage multiple collections (workspaces) to isolate different document sets
-- Persist chat history and uploaded file metadata across sessions (via localStorage on the frontend and optional Supabase backend)
+The app lets authenticated users:
 
----
+- Sign up and log in with Supabase Auth.
+- Create collections to organize document workspaces.
+- Upload PDF files into a selected collection.
+- Process PDFs asynchronously in a Celery worker.
+- Extract PDF text page by page with `pypdf`.
+- Split pages into chunks using semantic chunking when available, with recursive chunking fallback.
+- Generate embeddings with Ollama via LangChain's `OllamaEmbeddings`.
+- Store vectors in ChromaDB by default, or FAISS when configured.
+- Ask questions against indexed documents.
+- Receive grounded answers from an Ollama chat/generation model.
+- View source citations, relevance scores, and retrieved chunk counts.
+- Save chat sessions and messages in Supabase.
+- Persist per-user settings such as retrieval depth, temperature, theme, source visibility, response style, and RAG mode.
+- Monitor queue/cache/worker stats from the dashboard.
 
-## Features
-- **Document Ingestion**: PDF & DOCX loaders, recursive character‑based chunking, metadata preservation
-- **Vector Storage**: ChromaDB (persistent) with pluggable interface for other stores (FAISS, etc.)
-- **Embeddings**: Sentence‑Transformers / HuggingFace models (configurable)
-- **LLM Backend**: Ollama (supports Llama 2, Mistral, etc.) with adjustable temperature, top‑p, top‑k
-- **Retrieval**: Semantic search with configurable top‑K and similarity threshold
-- **Citation Generation**: Inline citations linking to source chunks
-- **Multi‑tenant Collections**: Separate vector stores per collection
-- **Chat History**: Persisted per‑session (localStorage) with optional Supabase backup
-- **RESTful API**: Fully typed OpenAPI docs (Swagger/ReDoc)
-- **React/Vite Frontend**: Modern UI with TailwindCSS, modal uploads, chat windows, collection manager
-- **Docker & Kubernetes Ready**: Production‑grade deployment files
-- **Comprehensive Test Suite**: Unit & integration tests for backend and frontend
+## Current Architecture
 
----
-
-## Architecture
-```
-RAG/
-├── backend/                     # Python/FastAPI service
-│   ├── api/                     # REST route handlers
-│   ├── rag/                     # Core RAG pipeline (loaders, chunking, embeddings, vectorstore, retrievers, pipelines, LLM)
-│   ├── services/                # Business logic wrappers
-│   ├── db/                      # SQLAlchemy models & migrations
-│   ├── schemas/                 # Pydantic request/response models
-│   ├── config/                  # Settings, database, logging
-│   └── uploads/                 # Temporary file storage
-├── frontend/                    # React/Vite SPA
-│   ├── src/
-│   │   ├── pages/               # Route‑based pages (Chat, Documents, etc.)
-│   │   ├── components/          # Reusable UI pieces
-│   │   ├── hooks/               # Custom React hooks (useChat, useAuth, …)
-│   │   ├── services/            # API service layer
-│   │   ├── context/             # React Context for global state
-│   │   └── types/               # TypeScript definitions
-└── infrastructure/              # Docker, K8s, scripts
+```text
+Browser
+  |
+  | React 19 + Vite SPA
+  | routes: login, signup, dashboard, upload, chat, documents, history, settings
+  v
+FastAPI backend
+  |
+  | /api/v1 routes
+  |
+  +-- Supabase
+  |     auth, profiles, collections, documents, chat_sessions,
+  |     chat_messages, settings, processing status
+  |
+  +-- Redis
+  |     Celery broker and chat response cache
+  |
+  +-- Celery worker
+  |     async PDF ingestion and processing progress updates
+  |
+  +-- Ollama
+  |     embeddings: mxbai-embed-large:latest by default
+  |     generation: qwen2.5:3b by default
+  |
+  +-- Vector store
+        ChromaDB persistent store by default
+        FAISS supported by configuration
 ```
 
-Data Flow (Upload → Query):
-1. User uploads file → `upload_service` saves file → `PDFLoader`/`DocxLoader` extracts text
-2. `TextSplitter` creates chunks (500 ch, 100 overlap) → metadata enriched
-3. `EmbeddingService` generates vectors (sentence‑transformer model)
-4. `VectorStore` (ChromaDB) stores `{id, chunk_text, embedding, metadata}`
-5. On chat request: query embedded → similarity search → top‑K chunks filtered by threshold τ
-6. Retrieved chunks + system prompt → LLM (Ollama) generates answer
-7. Response parsed, citations attached, stored in chat history
+The backend source of truth is `backend/app`. Some older top-level backend folders still exist (`backend/api`, `backend/rag`, `backend/services`, etc.), but the running application imports from `backend/app/...`.
 
----
+## Main Data Flows
+
+### Upload and Ingestion
+
+1. The frontend sends a multipart PDF upload to `POST /api/v1/upload`.
+2. `UploadService.save_uploaded_file()` validates the file and stores it under `backend/app/uploads` by default.
+3. A row is inserted into Supabase `documents` with `processing_status = queued`.
+4. `process_document_task` is enqueued on the Celery `document_processing` queue.
+5. The worker loads the PDF with `PDFLoader`.
+6. `TextSplitter` chunks the extracted pages.
+7. `EmbeddingModel` generates Ollama embeddings in batches.
+8. Chunks, metadata, and embeddings are stored in ChromaDB or FAISS.
+9. Supabase `documents` is updated with progress, page count, chunk count, job id, completion time, or failure details.
+10. The frontend polls `GET /api/v1/documents/{document_id}/status`.
+
+### Chat
+
+1. The frontend sends `POST /api/v1/chat`.
+2. `ChatService` applies the requested RAG mode, top-k, temperature, style, and source visibility settings.
+3. Redis cache is checked using collection, question, RAG mode, and response style.
+4. The user question is embedded with Ollama.
+5. `SemanticRetriever` searches the selected vector collection.
+6. Results are filtered by `SIMILARITY_THRESHOLD`.
+7. A grounded prompt is built with numbered context blocks.
+8. Ollama generates the answer.
+9. The response returns answer text, sources, retrieved chunk count, and response time.
+10. When enabled, the frontend saves the conversation through `/api/v1/chat/messages`.
+
+### Authentication and User State
+
+1. The frontend uses `@supabase/supabase-js` for auth session management.
+2. Protected routes require a Supabase session.
+3. Backend profile routes read/write the `profiles` table.
+4. Collections, documents, settings, and chat history are user-scoped through explicit `user_id` parameters and Supabase RLS policies.
 
 ## Technology Stack
-| Layer | Technology |
-|-------|------------|
-| **Backend** | Python 3.11, FastAPI, Uvicorn |
-| **Database** | SQLAlchemy (PostgreSQL via Supabase optional), ChromaDB |
-| **Embedding** | Sentence‑Transformers (`sentence-transformers/all-MiniLM-L6-v2` default) |
-| **LLM** | Ollama (supports Llama2, Mistral, Nemotron, etc.) |
-| **Frontend** | React 18, Vite, TypeScript, TailwindCSS |
-| **State Management** | React Context + localStorage |
-| **HTTP Client** | Axios |
-| **Dev** | ESLint, Prettier, Jest/Test‑Runner (frontend), Pytest (backend) |
-| **CI/CD** | Docker, Docker‑Compose, Kubernetes manifests |
 
----
+| Layer | Current Implementation |
+| --- | --- |
+| Frontend | React 19, Vite 8, React Router 7, Axios, Framer Motion, Lucide React, Tailwind CSS 4 |
+| Backend API | Python, FastAPI, Uvicorn, Pydantic v2, pydantic-settings |
+| Auth and metadata DB | Supabase Auth and Supabase Postgres |
+| PDF loading | `pypdf` wrapped in `PDFLoader` |
+| Chunking | LangChain `SemanticChunker` when available; Markdown/recursive fallback |
+| Embeddings | Ollama embeddings through `langchain_ollama.OllamaEmbeddings` |
+| LLM | Ollama HTTP API through `OllamaClient` |
+| Vector DB | ChromaDB default; FAISS optional |
+| Queue | Celery with Redis broker and `rpc://` result backend |
+| Cache | Redis chat response cache |
+| Scripts | Windows `.bat` launchers for backend, frontend, Redis, worker, and Flower |
+
+## Project Structure
+
+```text
+RAG/
+  README.md
+  start_rag_project.bat        # launches Redis, backend, frontend, Celery worker
+  stop_rag_project.bat         # stops local project services
+  test_supabase.py             # Supabase connectivity probe
+  infrastructure/
+    phase6_settings_migration.sql
+    phase6_settings_fix_migration.sql
+  docs/
+    rls-policies.sql
+  backend/
+    requirements.txt
+    .env.example
+    start_backend.bat
+    start_worker.bat
+    start_flower.bat
+    fix_settings_table.py
+    app/
+      main.py                  # FastAPI entrypoint
+      core/
+        config.py              # central runtime settings
+        celery_app.py          # Celery app factory
+      db/
+        supabase.py            # Supabase client factories
+      api/routes/
+        upload_routes.py
+        chat_routes.py
+        documents_routes.py
+        collections_routes.py
+        chat_history_routes.py
+        auth_routes.py
+        settings_routes.py
+        queue_routes.py
+      services/
+        upload_service.py
+        chat_service.py
+        cache_service.py
+        faiss_search_adapter.py
+      tasks/
+        document_tasks.py
+      rag/
+        loaders/pdf_loader.py
+        chunking/text_splitter.py
+        embeddings/embedding_model.py
+        retrievers/semantic_retriever.py
+        pipelines/retrieval_pipeline.py
+        vectorstore/chroma_manager.py
+        vectorstore/faiss_manager.py
+        llm/ollama_client.py
+      schemas/
+        upload_schema.py
+        chat_schema.py
+    db/
+      schema.sql
+      rls_policies.sql
+    migrations/
+      phase7_async_processing.sql
+    tests and root test_*.py files
+  frontend/
+    package.json
+    vite.config.js
+    start_frontend.bat
+    src/
+      main.jsx
+      App.jsx
+      index.css
+      lib/supabase.js
+      services/api.js
+      router/index.jsx
+      contexts/AuthContext.jsx
+      contexts/SettingsContext.jsx
+      components/AppLayout.jsx
+      components/ProtectedRoute.jsx
+      pages/
+        Login.jsx
+        Signup.jsx
+        Dashboard.jsx
+        Upload.jsx
+        Chat.jsx
+        Documents.jsx
+        History.jsx
+        Settings.jsx
+```
+
+## Backend Details
+
+The FastAPI app is defined in `backend/app/main.py`.
+
+Mounted routers:
+
+- `/api/v1/upload`
+- `/api/v1/chat`
+- `/api/v1/auth`
+- `/api/v1/documents`
+- `/api/v1/collections`
+- `/api/v1/settings`
+- `/api/v1/queue`
+
+Base utility routes:
+
+- `GET /` returns app status and version.
+- `GET /health` returns health information.
+- `GET /docs` exposes Swagger UI.
+- `GET /redoc` exposes ReDoc.
+
+Important backend components:
+
+- `Settings` in `app/core/config.py`: loads `.env`, creates runtime directories, validates Ollama URL, validates chunk size/overlap, and exposes all defaults.
+- `UploadService`: validates PDFs, saves uploads, and can run synchronous ingestion.
+- `process_document_task`: the active async ingestion path used by upload routes.
+- `ChatService`: orchestrates retrieval, prompt construction, Ollama generation, source formatting, and Redis caching.
+- `EmbeddingModel`: singleton wrapper around Ollama embeddings.
+- `SemanticRetriever`: retrieves and filters vector results by similarity threshold.
+- `ChromaManager` and `FAISSManager`: vector store implementations.
+- `cache_service`: Redis cache wrapper used for chat response caching and dashboard stats.
+- `supabase.py`: anon and service-role client factories.
+
+## Frontend Details
+
+The frontend is a protected React SPA.
+
+Routes:
+
+- `/login`: public login screen.
+- `/signup`: public signup screen.
+- `/dashboard`: overview and queue intelligence.
+- `/upload`: PDF upload workflow.
+- `/chat`: new chat.
+- `/chat/:sessionId`: existing chat session.
+- `/documents`: document list and document operations.
+- `/history`: saved chat sessions.
+- `/settings`: per-user AI/workspace preferences.
+
+Key frontend modules:
+
+- `src/lib/supabase.js`: creates the Supabase browser client from `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
+- `src/contexts/AuthContext.jsx`: manages Supabase session, current user, profile fetch, login, signup, and logout.
+- `src/contexts/SettingsContext.jsx`: loads backend settings, performs optimistic updates, debounces saves, and applies theme.
+- `src/services/api.js`: central Axios wrapper for backend API calls.
+- `src/router/index.jsx`: route definitions and protected layout.
 
 ## Configuration
-Configuration lives in `backend/config/settings.py` (loaded from environment variables or `.env`). Key variables:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `APP_NAME` | Application name | `RAG Backend` |
-| `API_VERSION` | API version string | `v1` |
-| `DEBUG` | Enable debug mode | `True` |
-| `HOST` | Bind host | `0.0.0.0` |
-| `PORT` | Bind port | `8000` |
-| `CHUNK_SIZE` | Max characters per chunk | `500` |
-| `CHUNK_OVERLAP` | Overlap between chunks | `100` |
-| `EMBEDDING_MODEL_NAME` | HuggingFace sentence‑transformer model | `sentence-transformers/all-MiniLM-L6-v2` |
-| `EMBEDDING_DEVICE` | `cpu` or `cuda` | `cpu` |
-| `VECTOR_DB_TYPE` | `chromadb` or `faiss` | `chromadb` |
-| `CHROMA_PERSIST_DIR` | Persistence path for ChromaDB | `./chroma_db` |
-| `FAISS_INDEX_DIR` | Persistence path for FAISS | `./faiss_index` |
-| `OLLAMA_BASE_URL` | Ollama server URL | `http://localhost:11434` |
-| `OLLAMA_MODEL` | Default LLM model | `llama2` |
-| `LLM_TEMPERATURE` | Sampling temperature | `0.7` |
-| `LLM_TOP_P` | Nucleus sampling top‑p | `0.9` |
-| `LLM_TOP_K` | Top‑k sampling | `40` |
-| `RETRIEVAL_TOP_K` | Number of chunks to retrieve before threshold | `5` |
-| `RETRIEVAL_THRESHOLD` | Similarity threshold (cosine) for keeping chunks | `0.75` |
-| `SUPABASE_URL` | Supabase project URL (optional) | *(empty)* |
-| `SUPABASE_ANON_KEY` | Supabase anon key (optional) | *(empty)* |
-| `LOG_LEVEL` | Logging level | `INFO` |
-| `CORS_ORIGINS` | Allowed CORS origins (comma‑separated) | `*` |
-| `MAX_UPLOAD_SIZE` | Max upload size in bytes | `10485760` (10 MB) |
-| `UPLOAD_DIR` | Temporary upload folder | `./uploads` |
+Backend configuration is read from `backend/.env` through `app/core/config.py`.
 
-> **Note**: Leaving `SUPABASE_URL` and `SUPABASE_ANON_KEY` empty disables Supabase persistence; the system works fully with local ChromaDB and localStorage.
+Important backend environment variables:
 
-Create a `.env` file in the `backend/` folder based on `.env.example`.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `APP_NAME` | `RAG Backend` | FastAPI app title |
+| `API_VERSION` | `v1` | API route prefix |
+| `DEBUG` | `False` | Enables debug error detail |
+| `HOST` | `0.0.0.0` | Backend host setting |
+| `PORT` | `8000` | Backend port setting |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server |
+| `OLLAMA_MODEL` | `qwen2.5:3b` | Generation model |
+| `EMBEDDING_MODEL` | `mxbai-embed-large:latest` | Ollama embedding model |
+| `REQUEST_TIMEOUT` | `120` | Ollama request timeout seconds |
+| `VECTOR_DB_TYPE` | `chromadb` | `chromadb` or `faiss` |
+| `CHROMA_DB_PATH` | unset | Optional override for Chroma persistence |
+| `CHROMA_COLLECTION_NAME` | `default_ollama` | Default vector collection |
+| `FAISS_INDEX_PATH` | unset | Optional override for FAISS persistence |
+| `CHUNK_SIZE` | `1000` | Fallback chunk size |
+| `CHUNK_OVERLAP` | `200` | Fallback chunk overlap |
+| `SIMILARITY_THRESHOLD` | `0.10` | Minimum score retained by retriever |
+| `UPLOAD_DIR` | `backend/app/uploads` | PDF storage directory |
+| `MAX_UPLOAD_SIZE` | `26214400` | 25 MB upload limit |
+| `DEFAULT_TOP_K` | `3` | Backend default retrieval count |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis cache URL |
+| `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Celery broker |
+| `CELERY_RESULT_BACKEND` | `rpc://` | Celery result backend |
+| `REDIS_CACHE_TTL` | `300` | Chat cache TTL seconds |
+| `CELERY_TASK_MAX_RETRIES` | `3` | Document processing retries |
+| `SUPABASE_URL` | empty | Supabase project URL |
+| `SUPABASE_ANON_KEY` | empty | Supabase anon key |
+| `SUPABASE_SERVICE_ROLE_KEY` | empty | Supabase service-role key for backend writes |
 
----
+Frontend configuration should live in `frontend/.env`.
 
-## Core Components & Values
+```env
+VITE_API_BASE_URL=http://localhost:8000
+VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+VITE_SUPABASE_ANON_KEY=YOUR_ANON_KEY_HERE
+```
 
-### Embedding Model
-- **Provider**: HuggingFace Sentence‑Transformers
-- **Default Model**: `all-MiniLM-L6-v2` (384‑dimension, fast & accurate)
-- **Device**: Configurable via `EMBEDDING_DEVICE` (`cpu`/`cuda`)
-- **Batch Size**: Internally handled by the model; can be tuned in `embedding_service.py` if needed
+Note: most API calls in `frontend/src/services/api.js` currently use `http://localhost:8000` directly. `AuthContext` uses `VITE_API_BASE_URL`.
 
-### LLM & Generation Settings
-- **Backend**: Ollama HTTP API
-- **Default Model**: `llama2` (change via `OLLAMA_MODEL`)
-- **Temperature**: `LLM_TEMPERATURE` (default `0.7`) – controls randomness
-- **Top‑p**: `LLM_TOP_P` (default `0.9`) – nucleus sampling
-- **Top‑k**: `LLM_TOP_K` (default `40`) – limits sampling pool
-- **Max Tokens**: Determined by model; can be overridden in prompt templates if needed
-- **System Prompt**: Defined in `backend/rag/prompts/system_prompts.py` – instructs model to answer based on provided context and to cite sources
-
-### Chunking Strategy
-- **Algorithm**: `RecursiveCharacterTextSplitter` (LangChain)
-- **Separators** (in order): `"\n\n"`, `"\n"`, `" "`, `""`
-- **Chunk Size**: `CHUNK_SIZE` = **500** characters
-- **Chunk Overlap**: `CHUNK_OVERLAP` = **100** characters
-- **Metadata Enrichment**:
-  - Original document metadata preserved
-  - Added fields: `source_document_index`, `chunk_index`, `chunk_total`, `chunk_size`
-- **Chunk Validation**: Ensures no empty chunks, logs statistics
-
-### Retrieval Settings
-- **Vector Store**: ChromaDB (persistent) – pluggable interface defined in `base_vectorstore.py`
-- **Similarity Metric**: Cosine similarity (default for ChromaDB)
-- **Top‑K**: `RETRIEVAL_TOP_K` = **5** (number of nearest neighbours fetched before thresholding)
-- **Similarity Threshold**: `RETRIEVAL_THRESHOLD` = **0.75** (chunks with cosine similarity ≥ 0.75 are kept)
-- **Fallback**: If fewer than 1 chunk passes threshold, the system falls back to the top‑1 chunk (to avoid empty context) – configurable in `semantic_retriever.py`
-
-### Threshold & Top‑K
-- **Top‑K (`RETRIEVAL_TOP_K`)**: Controls how many candidates are fetched from the vector store before applying the threshold. Higher values increase recall but add latency.
-- **Threshold (`RETRIEVAL_THRESHOLD`)**: Minimum similarity score required for a chunk to be considered relevant.  
-  - **Low τ (e.g., 0.5)** → more chunks, higher recall, potential noise.  
-  - **High τ (e.g., 0.85)** → fewer, highly relevant chunks, higher precision.
-- **Recommendation**: Start with the defaults (`top_k=5`, `τ=0.75`) and adjust using the validation procedure described in the[Tuning Threshold](#threshold--top-k) section of this README.
-
----
-
-## Setup & Installation
+## Setup
 
 ### Prerequisites
-- **Git**
-- **Python 3.11+**
-- **Node.js 18+** (for frontend)
-- **Ollama** installed & running (download from https://ollama.com)
-- **(Optional)** Docker & Docker‑Compose for containerized deployment
-- **(Optional)** Supabase account if you want cloud persistence
+
+- Windows PowerShell or CMD, based on the provided scripts.
+- Python 3.11+ recommended.
+- Node.js 18+ recommended.
+- Redis running locally or available through Docker/WSL.
+- Ollama installed and running.
+- A Supabase project with the required tables and RLS policies.
 
 ### Backend
-```bash
-# Clone repo (if not already)
-git clone <repo-url>
-cd RAG/backend
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt   # or pip install -r pyproject.toml
-# Ensure sentence-transformers, chromadb, fastapi, uvicorn, python-dotenv are installed
-
-# Copy environment template
-cp .env.example .env
-# Edit .env as needed (see Configuration section)
-
-# Initialize DB (if using PostgreSQL via Supabase)
-# For local ChromaDB, no further DB setup needed
-```
-
-### Frontend
-```bash
-cd ../frontend
-npm install
-# Create .env from example (optional)
-cp .env.example .env
-# Adjust VITE_API_BASE_URL if backend runs on different host/port
-```
-
-### Ollama (LLM)
-```bash
-# Install Ollama (https://ollama.com/download)
-# Pull a model, e.g.:
-ollama pull llama2
-# Ensure Ollama server is running (default localhost:11434)
-ollama serve   # runs in background
-```
-
----
-
-## Running the Application
-
-### Development Mode (Separate Terminals)
-
-#### Backend
 ```bash
 cd backend
-# Activate venv if not already
-source venv/bin/activate
-python -m app.main   # or: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
 ```
-API docs available at:
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
 
-#### Frontend
+Update `backend/.env` with your Supabase, Ollama, Redis, vector DB, and path settings.
+
+The current code imports packages that may not be present in `requirements.txt` in some environments, including `langchain-ollama`, `langchain-text-splitters`, `langchain-experimental`, `langchain-chroma`, and FAISS support if you use `VECTOR_DB_TYPE=faiss`. Install them if imports fail.
+
+### Ollama
+
+```bash
+ollama serve
+ollama pull qwen2.5:3b
+ollama pull mxbai-embed-large:latest
+```
+
+The generation model and embedding model are independent. Keep vector collections consistent with the embedding model dimension. The ingestion code can recreate Chroma collections when it detects an embedding dimension mismatch.
+
+### Frontend
+
 ```bash
 cd frontend
-npm run dev   # Vite dev server, defaults to http://localhost:5173
+npm install
 ```
-The frontend will proxy API calls to `http://localhost:8000` (adjust `VITE_API_BASE_URL` in `.env` if needed).
 
-### Production (Docker‑Compose)
+Create `frontend/.env` with Supabase browser credentials and, if needed, API base URL.
+
+### Supabase
+
+Apply the SQL files in the project before relying on auth, collections, documents, settings, and chat history:
+
+- `backend/db/schema.sql`
+- `backend/db/rls_policies.sql`
+- `docs/rls-policies.sql`
+- `infrastructure/phase6_settings_migration.sql`
+- `infrastructure/phase6_settings_fix_migration.sql`
+- `backend/migrations/phase7_async_processing.sql`
+
+The exact order depends on your current Supabase state. For a new project, start with the schema, then RLS, then phase migrations.
+
+## Running Locally
+
+### One-command Windows launcher
+
+From the repository root:
+
+```bat
+start_rag_project.bat
+```
+
+This attempts to start:
+
+- Redis on `localhost:6379`
+- FastAPI on `http://localhost:8000`
+- React/Vite on `http://localhost:5173`
+- Celery worker on the `document_processing` queue
+
+Then open:
+
+- App: `http://localhost:5173`
+- API docs: `http://localhost:8000/docs`
+- Health: `http://localhost:8000/health`
+
+Stop services with:
+
+```bat
+stop_rag_project.bat
+```
+
+### Manual startup
+
+Terminal 1:
+
 ```bash
-cd infrastructure/docker
-docker-compose -f docker-compose.prod.yml up -d
+redis-server
 ```
-This spins up:
-- backend (FastAPI + Uvicorn)
-- frontend (Nginx serving built React app)
-- ChromaDB (persistent volume)
-- Ollama (separate service; ensure model is pulled inside container or mount model store)
 
----
+Terminal 2:
 
-## API Endpoints
-All routes are prefixed with `/api/v1`.
+```bash
+cd backend
+venv\Scripts\activate
+python -m uvicorn app.main:app --reload
+```
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| **POST** | `/upload` | Upload a PDF/DOCX, returns `UploadResponse` with `document_id`, `total_chunks`, etc. |
-| **GET** | `/documents` | List documents for a user (supports `collection_id` filter) |
-| **GET** | `/documents/{document_id}` | Get metadata for a specific document |
-| **DELETE** | `/documents/{document_id}` | Delete a document (and its vectors) |
-| **POST** | `/chat` | Send a chat request (`question`, optional `collection_id`, `top_k`). Returns answer, sources, response time. |
-| **POST** | `/chat/sessions` | Create a new chat session |
-| **GET** | `/chat/sessions` | List chat sessions for a user |
-| **GET** | `/chat/sessions/{session_id}` | Get a session with its messages |
-| **DELETE** | `/chat/sessions/{session_id}` | Delete a session and its messages |
-| **POST** | `/chat/messages` | Save a chat message (used internally by frontend) |
-| **GET** | `/auth/profile/{user_id}` | Get user profile |
-| **POST** | `/auth/profile` | Create/update profile (called after Supabase sign‑up) |
-| **GET** | `/health` | Health check |
-| **GET** | `/search` | Advanced semantic search (returns chunks with scores) |
+Terminal 3:
 
-Full OpenAPI spec accessible at `/docs`.
+```bash
+cd backend
+venv\Scripts\activate
+python -m celery -A app.core.celery_app worker --loglevel=info --pool=solo -Q document_processing
+```
 
----
+Terminal 4:
 
-## Frontend Usage
-- **Dashboard**: Overview of document count, chat sessions, uploads, collections.
-- **Documents**: Upload new files, view list, delete files, see chunk counts.
-- **Chat**: Select a collection, type questions, view answers with inline citations, copy or regenerate.
-- **Chat History** (`/history`): Browse past conversations; clicking a entry loads that chat for continuation.
-- **Collections**: Create, edit, delete collections; each collection has its own isolated vector store.
-- **Search**: Advanced search page to explore raw retrieved chunks and scores.
+```bash
+cd frontend
+npm run dev
+```
 
-State (uploaded file list, chat history) is persisted in `localStorage`; clearing browser storage resets it unless Supabase is configured.
+Optional Flower:
 
----
+```bash
+cd backend
+start_flower.bat
+```
+
+## API Reference
+
+All application API routes are under `/api/v1`.
+
+### Upload
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/upload` | Upload a PDF and enqueue async ingestion. Returns `document_id`, `job_id`, status, filename, and collection. |
+| `POST` | `/api/v1/upload/collections` | Legacy-style collection creation response without Supabase persistence. |
+| `GET` | `/api/v1/upload/documents/{document_id}` | Legacy metadata endpoint currently returns 404 placeholder. |
+
+### Chat
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/chat` | Ask a RAG question. Supports `question`, `collection_id`, `top_k`, `temperature`, `rag_mode`, `response_style`, and `show_sources`. |
+
+### Chat History
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/chat/sessions?user_id=...` | List chat sessions for a user. |
+| `POST` | `/api/v1/chat/sessions?user_id=...&title=...` | Create a new chat session. |
+| `GET` | `/api/v1/chat/sessions/{session_id}?user_id=...` | Fetch a session and its messages. |
+| `POST` | `/api/v1/chat/messages` | Save a chat message. |
+| `DELETE` | `/api/v1/chat/sessions/{session_id}?user_id=...` | Delete a chat session and messages. |
+
+### Documents
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/documents?user_id=...` | Paginated list with optional `collection_id`, `search`, `sort_by`, `sort_order`, `limit`, and `offset`. |
+| `GET` | `/api/v1/documents/{document_id}?user_id=...` | Fetch one document row. |
+| `GET` | `/api/v1/documents/{document_id}/preview?user_id=...` | Fetch preview metadata. |
+| `PATCH` | `/api/v1/documents/{document_id}?user_id=...` | Rename a document with body `{ "filename": "..." }`. |
+| `PATCH` | `/api/v1/documents/{document_id}/collection?user_id=...` | Move a document to another collection and enqueue reprocessing. |
+| `DELETE` | `/api/v1/documents/{document_id}?user_id=...` | Delete document row and best-effort vector/file/storage cleanup. |
+| `GET` | `/api/v1/documents/{document_id}/status` | Poll async processing status. |
+| `POST` | `/api/v1/documents/{document_id}/retry` | Re-enqueue a failed document. |
+
+### Collections
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/collections?user_id=...&name=...` | Create a Supabase-backed collection. |
+| `GET` | `/api/v1/collections?user_id=...` | List user collections with best-effort document counts. |
+| `PATCH` | `/api/v1/collections/{collection_id}?user_id=...` | Rename collection. |
+| `DELETE` | `/api/v1/collections/{collection_id}?user_id=...` | Delete collection and its document rows. |
+
+### Auth/Profile
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/auth/profile/{user_id}` | Fetch profile row. |
+| `POST` | `/api/v1/auth/profile` | Upsert profile after signup. |
+| `PATCH` | `/api/v1/auth/profile/{user_id}` | Update profile fields. |
+
+### Settings
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/settings/{user_id}` | Fetch settings; creates defaults if missing. |
+| `PATCH` | `/api/v1/settings/{user_id}` | Partially update settings. |
+| `POST` | `/api/v1/settings/{user_id}/reset` | Reset settings to factory defaults. |
+
+### Queue
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/queue/stats` | Return queued/active/completed/failed counts, Redis cache stats, and Celery worker status. |
+
+## Database and Persistence
+
+Supabase is used for:
+
+- Auth users through Supabase Auth.
+- `profiles` for app profile data.
+- `collections` for user document groups.
+- `documents` for upload metadata and processing status.
+- `chat_sessions` and `chat_messages` for conversation history.
+- `settings` for user preferences.
+
+Vector data is stored separately:
+
+- ChromaDB persists under `CHROMA_PERSIST_DIR`.
+- FAISS persists under `FAISS_INDEX_DIR`.
+
+Uploaded PDFs are stored locally under `UPLOAD_DIR`. Supabase Storage cleanup is attempted during document deletion for common bucket names, but local disk is the primary upload path used by the current ingestion task.
+
+## RAG Pipeline Details
+
+### PDF Loading
+
+`PDFLoader` uses `pypdf.PdfReader`, creates one LangChain `Document` per PDF page, and attaches:
+
+- `source`
+- `file_name`
+- `page`
+- `page_number`
+
+Scanned PDFs without extractable text will fail processing unless OCR is added.
+
+### Chunking
+
+`TextSplitter` tries semantic chunking first:
+
+- `SemanticChunker`
+- percentile breakpoint threshold
+- threshold amount `95`
+- minimum chunk size `200`
+
+Fallback behavior:
+
+- split by markdown headers when available
+- then use `RecursiveCharacterTextSplitter`
+- default `chunk_size = 1000`
+- default `chunk_overlap = 200`
+- separators: blank line, newline, space, character
+
+Every chunk receives metadata such as:
+
+- `source_document_index`
+- `chunk_index`
+- `chunk_total`
+- `chunk_size`
+- `document_id`
+- `collection_id`
+- `uploaded_filename`
+- `chunk_id`
+
+### Embeddings
+
+Embeddings are generated by Ollama through `langchain_ollama.OllamaEmbeddings`.
+
+Default:
+
+```text
+mxbai-embed-large:latest
+```
+
+The embedding model is a singleton, so the first load is reused across requests and tasks in the same process.
+
+### Vector Storage
+
+Default backend:
+
+```text
+VECTOR_DB_TYPE=chromadb
+```
+
+ChromaDB stores document text, metadata, ids, and embeddings in a persistent client directory.
+
+Optional backend:
+
+```text
+VECTOR_DB_TYPE=faiss
+```
+
+FAISS manager support exists in the codebase, including persistence and document metadata operations.
+
+### Retrieval
+
+`SemanticRetriever`:
+
+- validates the query
+- calls vector store `search()`
+- filters results using `SIMILARITY_THRESHOLD`
+- sorts by score descending
+- returns `(Document, score)` tuples
+
+Default threshold:
+
+```text
+SIMILARITY_THRESHOLD=0.10
+```
+
+This is intentionally permissive. Raise it for stricter matching; lower it only if relevant chunks are being filtered out.
+
+### Generation
+
+`ChatService` builds a prompt that tells the model:
+
+- answer only from retrieved context
+- say the context is insufficient when needed
+- keep answers concise and factual
+- cite source numbers when useful
+
+RAG modes:
+
+| Mode | Top K | Temperature |
+| --- | ---: | ---: |
+| `precise` | 3 | 0.1 |
+| `balanced` | 5 | 0.3 |
+| `creative` | 8 | 0.8 |
+
+Response styles:
+
+- `professional`
+- `concise`
+- `beginner_friendly`
+- `research`
+- `technical`
+
+## Async Processing
+
+Document ingestion is queue-based.
+
+Celery settings:
+
+- app name: `rag_worker`
+- queue: `document_processing`
+- broker: Redis
+- result backend: `rpc://`
+- Windows worker pool: `solo`
+- max retries: 3
+- retry backoff: 10s, 20s, 40s
+
+Processing lifecycle:
+
+```text
+queued -> processing -> parsing -> chunking -> embedding -> vectorizing -> saving -> completed
+```
+
+Failure lifecycle:
+
+```text
+queued -> processing -> retrying -> processing -> failed
+```
+
+Supabase `documents` is the source of truth for:
+
+- `processing_status`
+- `processing_progress`
+- `processing_stage`
+- `job_id`
+- `processing_error`
+- `retry_count`
+- `processing_started_at`
+- `processing_completed_at`
 
 ## Testing
-### Backend
+
+Backend test files currently live mostly at the backend root:
+
+- `backend/test_pdf_loader.py`
+- `backend/test_chunking.py`
+- `backend/test_embeddings.py`
+- `backend/test_chromadb.py`
+- `backend/test_retriever.py`
+- `backend/test_pipeline.py`
+- `backend/test_ollama.py`
+
+Run:
+
 ```bash
 cd backend
 pytest -v
 ```
-Tests cover:
-- Loaders, chunking, embeddings
-- Vector store operations
-- Retrieval pipelines
-- API route handlers
-- Service layer logic
 
-### Frontend
+Frontend scripts:
+
 ```bash
 cd frontend
-npm run test   # Uses Jest + React Testing Library
-```
-Tests for UI components, hooks, and API service mocks.
-
----
-
-## Deployment
-### Docker (single‑host)
-```bash
-cd infrastructure/docker
-docker-compose up -d   # uses docker-compose.yml (dev) or docker-compose.prod.yml (prod)
+npm run lint
+npm run build
 ```
 
-### Kubernetes
-```bash
-cd infrastructure/kubernetes
-kubectl apply -f .
-```
-Includes Deployments, Services, Ingress, PersistentVolumes for ChromaDB and Ollama.
+There is no frontend test script currently defined in `frontend/package.json`.
 
-### Environment Variables for Prod
-Set the following in your CI/CD or K8s secrets:
-- `OLLAMA_BASE_URL`
-- `OLLAMA_MODEL`
-- `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_TOP_K`
-- `RETRIEVAL_TOP_K`, `RETRIEVAL_THRESHOLD`
-- `SUPABASE_URL`, `SUPABASE_ANON_KEY` (if using)
-- `VECTOR_DB_TYPE` (chromadb/faiss)
-- `LOG_LEVEL=warning`
+## Known Caveats
 
----
+- The root README that existed before this update was stale and contained encoding artifacts; this version is ASCII-clean.
+- `backend/requirements.txt` lists `sentence-transformers`, but the current embedding implementation uses `langchain_ollama.OllamaEmbeddings`. Install `langchain-ollama` if it is missing.
+- `TextSplitter` imports newer LangChain packages such as `langchain-text-splitters` and optionally `langchain-experimental`; install them if chunking imports fail.
+- `ChromaManager` prefers `langchain_chroma` when available, then the code has native Chroma fallbacks in service paths. Install `langchain-chroma` for the manager path.
+- `frontend/src/services/api.js` hardcodes `http://localhost:8000` while `AuthContext` uses `VITE_API_BASE_URL`.
+- `start_rag_project.bat` contains a visible `ssREM` typo before the frontend section. The launcher may still proceed depending on CMD behavior, but it should be cleaned up.
+- Supabase service-role key is required for backend writes in collections, settings, chat history, and document status updates.
+- Uploaded file deletion currently checks the stored `filename` directly and may miss files stored under `UPLOAD_DIR` if only a basename is saved.
 
 ## Troubleshooting
-| Symptom | Likely Cause | Fix |
-|---------|--------------|-----|
-| **422 Unprocessable Entity** on `/chat/messages` | Payload fails Pydantic validation (missing/empty `question` or `answer`, wrong `sources_json` type) | Inspect request payload in DevTools Network tab; ensure non‑empty strings and proper JSON object for `sources_json` |
-| **503 Service Unavailable** on auth/profile routes | Supabase client not configured (empty credentials) but routes still raise 503 | Verify `backend/app/api/routes/auth_routes.py` `_sb()` returns `None` instead of raising; update as per fix |
-| **No chunks returned / empty answer** | Similarity threshold too high or embedding mismatch | Lower `RETRIEVAL_THRESHOLD` (e.g., to 0.60) or verify embedding model is loaded; check ChromaDB collection count |
-| **Backend fails to start** | Missing environment variable or port conflict | Check `.env` values; ensure ports 8000 (backend) and 5173 (frontend) are free |
-| **Frontend shows “Failed to load documents” but documents appear** | Backend documents route returns empty list (Supabase not configured) while frontend falls back to localStorage | Expected behavior when Supabase empty; ignore message or adjust backend to return empty list without error |
-| **Chat history not persisting after reload** | `localStorage` cleared or `useApp` context not initialized | Ensure `frontend/src/AppContext.jsx` reads/writes localStorage correctly; no ad‑blocker clearing storage |
-| **Ollama model not found** | Model not pulled or server not reachable | Run `ollama pull <model>` and verify `ollama serve` is running; check `OLLAMA_BASE_URL` |
 
----
+| Symptom | Likely Cause | Fix |
+| --- | --- | --- |
+| Frontend cannot log in | Missing `VITE_SUPABASE_URL` or `VITE_SUPABASE_ANON_KEY` | Add `frontend/.env` and restart Vite. |
+| Backend returns 503 for auth, documents, settings, or history | Supabase credentials missing | Set `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and for writes `SUPABASE_SERVICE_ROLE_KEY`. |
+| Upload returns queue error | Celery worker or Redis not running | Start Redis and `backend/start_worker.bat`. |
+| Document stays queued | Worker is not consuming `document_processing` | Check Celery window and Redis connection. |
+| PDF fails with no extractable text | Scanned/image-only PDF | Add OCR preprocessing or upload text-based PDFs. |
+| Chat says no chunks were retrieved | Empty vector collection, wrong collection id, high threshold, or embedding mismatch | Upload documents, verify collection, lower `SIMILARITY_THRESHOLD`, or recreate collection after embedding model changes. |
+| Ollama embedding model fails | Model not pulled or Ollama not running | Run `ollama serve` and `ollama pull mxbai-embed-large:latest`. |
+| Ollama generation fails | Chat model not pulled | Run `ollama pull qwen2.5:3b` or update `OLLAMA_MODEL`. |
+| Chroma dimension mismatch | Changed embedding model after indexing | Re-ingest documents or let the ingestion guard recreate affected collections. |
+| Frontend API calls hit the wrong backend | Hardcoded API base in `api.js` | Update `BASE_URL` or refactor to use `VITE_API_BASE_URL`. |
 
 ## License
-This project is licensed under the MIT License – see the `LICENSE` file for details.
 
----
-
-**Happy Retrieval‑Augmented Generating!**  
-For any questions, open an issue or reach out to the maintainers. 🚀
+No license file is currently present in the repository. Add one before publishing or distributing this project.

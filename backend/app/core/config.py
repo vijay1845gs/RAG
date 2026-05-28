@@ -71,8 +71,8 @@ class Settings(BaseSettings):
     CHUNK_SIZE: int = Field(default=1000, gt=0)
     CHUNK_OVERLAP: int = Field(default=200, ge=0)
 
-    # Similarity Threshold for Retrieval
-    SIMILARITY_THRESHOLD: float = Field(default=0.10, ge=0.0, le=1.0)
+    # Similarity Threshold for Retrieval (using 0.80 as maximum allowed distance)
+    SIMILARITY_THRESHOLD: float = Field(default=0.80, ge=0.0, le=2.0)
 
     # Uploads
     UPLOAD_DIR: Path = Field(

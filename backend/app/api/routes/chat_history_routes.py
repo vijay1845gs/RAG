@@ -21,7 +21,7 @@ chat_messages:
 
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -82,7 +82,7 @@ class SaveMessageRequest(BaseModel):
     session_id: str
     question: str
     answer: str
-    sources_json: Optional[List[dict]] = None
+    sources_json: Optional[Any] = None
     response_time: Optional[float] = None
     user_id: Optional[str] = None
 

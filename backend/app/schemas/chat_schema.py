@@ -71,6 +71,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Whether to include source citations in the response.",
     )
+    preferred_model: Optional[str] = Field(
+        default=None,
+        description="Frontend model preference, currently used for cache identity only.",
+    )
     user_id: Optional[str] = Field(
         default=None,
         description="User ID for per-user settings lookup.",
@@ -142,6 +146,38 @@ class SourceResponse(BaseModel):
     )
 
 
+class RetrievalDebugItem(BaseModel):
+    """Developer-facing retrieval details for one retrieved chunk."""
+
+    score: Optional[float] = Field(
+        default=None,
+        description="Similarity or relevance score for this retrieved chunk.",
+        examples=[0.91],
+    )
+    source: str = Field(
+        default="unknown",
+        description="Source document or file name.",
+        examples=["notes.pdf"],
+    )
+    page: Optional[int] = Field(
+        default=None,
+        description="Page number when available.",
+        examples=[4],
+    )
+    chunk_id: Optional[str] = Field(
+        default=None,
+        description="Chunk identifier when available.",
+    )
+    chunk_index: Optional[int] = Field(
+        default=None,
+        description="Chunk index when available.",
+    )
+    preview: str = Field(
+        default="",
+        description="Short text preview of the retrieved chunk.",
+    )
+
+
 class ChatResponse(BaseModel):
     """Successful AI chat response."""
 
@@ -159,6 +195,16 @@ class ChatResponse(BaseModel):
                         }
                     ],
                     "retrieved_chunks": 3,
+                    "retrieval_debug": [
+                        {
+                            "score": 0.8734,
+                            "source": "cia_notes.pdf",
+                            "page": 16,
+                            "chunk_id": "chunk-0032",
+                            "chunk_index": 32,
+                            "preview": "NLP helps computers understand...",
+                        }
+                    ],
                     "response_time": 2.481,
                 }
             ]
@@ -179,6 +225,10 @@ class ChatResponse(BaseModel):
         ge=0,
         description="Number of chunks retrieved for the answer.",
         examples=[3],
+    )
+    retrieval_debug: List[RetrievalDebugItem] = Field(
+        default_factory=list,
+        description="Optional developer-facing details about retrieved chunks.",
     )
     response_time: Optional[float] = Field(
         default=None,

@@ -27,6 +27,11 @@ const relevanceColor = (score) => {
   return 'bg-red-500'
 }
 
+const chunkCount = (turn) =>
+  turn?.retrieved_chunks ?? turn?.retrieval_count ?? turn?.sources?.length ?? 0
+
+const SHOW_RETRIEVAL_DEBUG = import.meta.env.DEV
+
 /* ═════════════════════════════════════════════════
    CHAT PAGE
 ══════════════════════════════════════════════════ */
@@ -61,6 +66,7 @@ export default function Chat() {
   const [sessionError, setSessionError] = useState(null)
   const [history, setHistory] = useState([])        // [{ question, answer, response_time, sources }]
   const [expandedSources, setExpandedSources] = useState({})
+  const [expandedDebug, setExpandedDebug] = useState({})
   const inputRef = useRef(null)
   const { addChatTurn } = useApp()
   // effectiveSessionId: URL param takes precedence; falls back to 'default' (for new chats)
@@ -71,11 +77,12 @@ export default function Chat() {
   const handleSend = useCallback(async (e) => {
     e?.preventDefault()
     if (!question.trim() || loading) return
+    const shouldSaveHistory = settings?.save_chat_history !== false
 
     // Resolve session: if we already have one (URL or previously created), reuse it;
     // otherwise create a fresh session now so every chat is persisted.
-    let session_id = effectiveSessionId
-    if (!session_id || session_id === 'default') {
+    let session_id = shouldSaveHistory ? effectiveSessionId : 'local'
+    if (shouldSaveHistory && (!session_id || session_id === 'default')) {
       try {
         const { data } = await createChatSession(user?.id, 'New Conversation')
         session_id = data?.session_id || session_id
@@ -91,28 +98,58 @@ export default function Chat() {
     }
 
     setLoading(true); setError(null); setAnswer(null)
+
+    // Determine if top_k and temperature are explicit user overrides vs just mode presets.
+    // If they match the presets (including the stale legacy balanced preset of 5), 
+    // we omit them from the payload so the backend's strict precedence takes over.
+    const mode = settings?.rag_mode ?? 'balanced'
+    let top_k = settings?.max_context_chunks ?? 5
+    let temperature = settings?.temperature ?? 0.3
+
+    const PRESETS = {
+      precise: { top_k: 3, temp: 0.1 },
+      balanced: { top_k: 3, temp: 0.3 },
+      creative: { top_k: 8, temp: 0.8 },
+    }
+    const STALE_BALANCED = { top_k: 5, temp: 0.3 }
+
+    const preset = PRESETS[mode] || PRESETS.balanced
+    const isCurrentPreset = top_k === preset.top_k && temperature === preset.temp
+    const isStalePreset = mode === 'balanced' && top_k === STALE_BALANCED.top_k && temperature === STALE_BALANCED.temp
+
+    if (isCurrentPreset || isStalePreset) {
+      top_k = undefined
+      temperature = undefined
+    }
+
     try {
       const { data } = await submitChat({
         collection_id: (selectedCollection || 'default').trim() || 'default',
         question: question.trim(),
-        top_k: settings?.max_context_chunks ?? 5,
-        temperature: settings?.temperature ?? 0.3,
-        rag_mode: settings?.rag_mode ?? 'balanced',
+        top_k,
+        temperature,
+        rag_mode: mode,
         response_style: settings?.response_style ?? 'professional',
         show_sources: settings?.show_sources !== false,
+        preferred_model: settings?.preferred_model,
         user_id: user?.id,
       })
       setAnswer(data)
       setHistory((prev) => [...prev, { question: question.trim(), ...data, session_id }])
-      addChatTurn({ question: question.trim(), ...data, session_id })
+      if (shouldSaveHistory) {
+        addChatTurn({ question: question.trim(), ...data, session_id })
+      }
 
       // Save to backend under the resolved session
-      if (user?.id) {
+      if (shouldSaveHistory && user?.id) {
         await saveChatMessage({
           session_id,
           question: question.trim(),
           answer: data.answer,
-          sources_json: data.sources,
+          sources_json: {
+            retrieved_chunks: data.retrieved_chunks,
+            sources: data.sources,
+          },
           response_time: data.response_time,
           user_id: user.id,
         })
@@ -125,7 +162,7 @@ export default function Chat() {
       setLoading(false)
       inputRef.current?.focus()
     }
-  }, [question, selectedCollection, loading, addChatTurn, user?.id, effectiveSessionId])
+  }, [question, selectedCollection, loading, addChatTurn, user?.id, effectiveSessionId, settings])
 
   /* ─── keyboard: Enter to send ───────────────────────────── */
   const handleKeyDown = (e) => {
@@ -159,12 +196,29 @@ export default function Chat() {
       .then(r => { if (!cancelled) {
         const messages = (r.data && r.data.messages) || []
         setHistory(
-          messages.map(m => ({
-            question: m.question,
-            answer: m.answer,
-            response_time: m.response_time,
-            sources: safeParseSources(m.sources_json),
-          }))
+          messages.map(m => {
+            const rawSources = safeParseSources(m.sources_json)
+            let sourcesArray = rawSources
+            let parsedChunks = m.retrieved_chunks
+
+            if (rawSources && !Array.isArray(rawSources) && typeof rawSources === 'object') {
+              sourcesArray = rawSources.sources || []
+              if (rawSources.retrieved_chunks !== undefined) {
+                parsedChunks = rawSources.retrieved_chunks
+              } else if (rawSources.retrieval_count !== undefined) {
+                parsedChunks = rawSources.retrieval_count
+              }
+            }
+
+            return {
+              question: m.question,
+              answer: m.answer,
+              response_time: m.response_time,
+              sources: sourcesArray,
+              retrieved_chunks: parsedChunks,
+              retrieval_count: m.retrieval_count
+            }
+          })
         )
         setEffectiveSessionId(sessionId)
         setSessionError(null)
@@ -182,13 +236,16 @@ export default function Chat() {
   /* parse `sources_json` from backend safely */
   const safeParseSources = (raw) => {
     if (!raw) return []
-    if (Array.isArray(raw)) return raw
+    if (typeof raw === 'object') return raw // Handles both arrays and objects native to JSONB
     try { return JSON.parse(raw) } catch { return [] }
   }
 
   /* ─── toggle source card ────────────────────────────────── */
   const toggleSource = (key) =>
     setExpandedSources((p) => ({ ...p, [key]: !p[key] }))
+
+  const toggleDebug = (key) =>
+    setExpandedDebug((p) => ({ ...p, [key]: !p[key] }))
 
   /* SOURCE CARD — reused in history and current-answer paths */
   const SourceCard = ({ chunk, indexPrefix }) => {
@@ -229,6 +286,52 @@ export default function Chat() {
             </motion.div>
           )}
         </AnimatePresence>
+      </div>
+    )
+  }
+
+  const RetrievalDebug = ({ items, debugKey }) => {
+    if (!SHOW_RETRIEVAL_DEBUG || !items?.length) return null
+
+    const open = !!expandedDebug[debugKey]
+    return (
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => toggleDebug(debugKey)}
+          className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-zinc-800/50 transition-colors"
+        >
+          <ChevronDown className={`h-4 w-4 text-zinc-500 transition-transform ${open ? 'rotate-180' : ''}`} />
+          <span className="text-xs font-medium text-zinc-400 uppercase tracking-wider">
+            Retrieval Debug ({items.length} chunks)
+          </span>
+        </button>
+
+        {open && (
+          <div className="border-t border-zinc-800/60 divide-y divide-zinc-800/60">
+            {items.map((item, idx) => (
+              <div key={`${debugKey}-${item.chunk_id ?? idx}`} className="px-4 py-3 space-y-1.5">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-500">
+                  <span className="font-medium text-zinc-300">Chunk {idx + 1}</span>
+                  <span>Score: {Number(item.score ?? 0).toFixed(4)}</span>
+                  <span>Page: {item.page ?? 'unknown'}</span>
+                  {item.chunk_index !== null && item.chunk_index !== undefined && (
+                    <span>Index: {item.chunk_index}</span>
+                  )}
+                </div>
+                <p className="text-xs text-zinc-500 truncate">
+                  Source: <span className="text-zinc-400">{item.source || 'unknown'}</span>
+                </p>
+                {item.chunk_id && (
+                  <p className="text-xs text-zinc-600 truncate">Chunk ID: {item.chunk_id}</p>
+                )}
+                <p className="text-xs text-zinc-400 leading-relaxed">
+                  {item.preview || 'No preview available.'}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     )
   }
@@ -388,7 +491,7 @@ export default function Chat() {
                       </span>
                       <span className="inline-flex items-center gap-1.5">
                         <FileText className="h-3.5 w-3.5" />
-                        {turn.sources?.length ?? 0} chunks
+                        {chunkCount(turn)} chunks
                       </span>
                     </div>
 
@@ -401,6 +504,8 @@ export default function Chat() {
                         ))}
                       </div>
                     )}
+
+                    <RetrievalDebug items={turn.retrieval_debug} debugKey={`history-${i}`} />
                   </div>
                 </div>
               </motion.div>
@@ -437,7 +542,7 @@ export default function Chat() {
                 </span>
                 <span className="inline-flex items-center gap-1.5">
                   <FileText className="h-3.5 w-3.5" />
-                  {answer.sources?.length ?? 0} chunks retrieved
+                  {chunkCount(answer)} chunks retrieved
                 </span>
               </div>
             </div>
@@ -451,6 +556,8 @@ export default function Chat() {
                 ))}
               </div>
             )}
+
+            <RetrievalDebug items={answer.retrieval_debug} debugKey="current" />
           </motion.div>
         )}
 

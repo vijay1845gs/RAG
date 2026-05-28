@@ -245,11 +245,32 @@ class SemanticRetriever:
                 self.logger.warning(f"No results found for query: {query[:50]}...")
                 return []
 
-            # Filter by similarity threshold
+            # ---- TEMPORARY DEBUG LOGS ADDED FOR DIAGNOSIS ----
+            self.logger.info(f"[DEBUG] Raw query: {query}")
+            raw_scores = [score for _, score in results]
+            self.logger.info(f"[DEBUG] Raw retrieved scores: {raw_scores}")
+            self.logger.info(f"[DEBUG] Threshold used: {self.similarity_threshold}")
+            # --------------------------------------------------
+
+            # Filter by threshold
+            # Compatibility Note: Chroma returns Squared L2 distance as the score.
+            # For distance metrics, a lower score = better match.
+            # The threshold comparison direction matters: we only keep chunks where score <= threshold.
+            # Future vector DB backends returning similarity scores (higher = better) 
+            # will need to normalize their output to match this distance semantic, 
+            # or the retriever must be updated to toggle the comparison direction.
             filtered_results = [
                 (doc, score) for doc, score in results 
-                if score >= self.similarity_threshold
+                if score <= self.similarity_threshold
             ]
+
+            # ---- MORE TEMPORARY DEBUG LOGS ----
+            filtered_scores = [score for _, score in filtered_results]
+            self.logger.info(f"[DEBUG] Filtered scores (accepted): {filtered_scores}")
+            rejected_chunks = len(results) - len(filtered_results)
+            accepted_chunks = len(filtered_results)
+            self.logger.info(f"[DEBUG] Chunks rejected: {rejected_chunks}, Chunks accepted: {accepted_chunks}")
+            # -----------------------------------
 
             if not filtered_results:
                 self.logger.warning(
@@ -258,8 +279,8 @@ class SemanticRetriever:
                 )
                 return []
 
-            # Sort by score in descending order (higher is better)
-            sorted_results = sorted(filtered_results, key=lambda x: x[1], reverse=True)
+            # Sort by score in ascending order (lower distance is better)
+            sorted_results = sorted(filtered_results, key=lambda x: x[1], reverse=False)
 
             self.logger.info(
                 f"Retrieved {len(sorted_results)} documents "

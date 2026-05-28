@@ -85,6 +85,7 @@ async def ask_question(request: ChatRequest) -> ChatResponse:
             rag_mode=request.rag_mode,
             response_style=request.response_style,
             show_sources=request.show_sources,
+            preferred_model=request.preferred_model,
         )
         return response
 

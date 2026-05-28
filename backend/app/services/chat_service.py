@@ -29,7 +29,7 @@ from app.rag.llm import (
 from app.rag.pipelines import RetrievalPipeline
 from app.rag.retrievers import RetrieverError, SemanticRetriever
 from app.rag.vectorstore import ChromaDBError, ChromaManager, FAISSManager, FAISSError
-from app.schemas.chat_schema import ChatResponse, SourceResponse
+from app.schemas.chat_schema import ChatResponse, RetrievalDebugItem, SourceResponse
 
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ class ChatService:
     # RAG mode presets: top_k and temperature overrides
     RAG_MODE_PRESETS = {
         "precise":  {"top_k": 3,  "temperature": 0.1},
-        "balanced": {"top_k": 5,  "temperature": 0.3},
+        "balanced": {"top_k": 3,  "temperature": 0.3},
         "creative": {"top_k": 8,  "temperature": 0.8},
     }
 
@@ -332,6 +332,7 @@ Grounded answer:
         rag_mode: Optional[str] = None,
         response_style: Optional[str] = None,
         show_sources: Optional[bool] = None,
+        preferred_model: Optional[str] = None,
     ) -> ChatResponse:
         """
         Orchestrate retrieval, prompt building, generation, and source formatting.
@@ -362,13 +363,23 @@ Grounded answer:
         # ─── Phase 7: Redis cache check ───────────────────────────────
         try:
             from app.services.cache_service import chat_cache
-            cached = chat_cache.get(effective_collection, question, mode, effective_style)
+            cached = chat_cache.get(
+                effective_collection,
+                question,
+                mode,
+                effective_style,
+                temperature=effective_temperature,
+                top_k=effective_top_k,
+                show_sources=show_sources,
+                preferred_model=preferred_model,
+            )
             if cached:
                 self.logger.info("Cache HIT — returning cached response. collection=%s", effective_collection)
                 return ChatResponse(
                     answer=cached.get("answer", ""),
                     sources=cached.get("sources", []) if show_sources is not False else [],
                     retrieved_chunks=cached.get("retrieved_chunks", 0),
+                    retrieval_debug=cached.get("retrieval_debug", []),
                     response_time=cached.get("response_time", 0.0),
                 )
         except Exception as cache_exc:
@@ -380,6 +391,18 @@ Grounded answer:
                 top_k=effective_top_k,
                 collection_id=collection_id,
             )
+
+            # Short-circuit if no relevant chunks were retrieved
+            if not retrieved_context.results:
+                self.logger.info("No context retrieved. Short-circuiting with safe fallback.")
+                return ChatResponse(
+                    answer="The retrieved context does not contain enough information.",
+                    sources=[],
+                    retrieved_chunks=0,
+                    retrieval_debug=[],
+                    response_time=time.perf_counter() - started_at,
+                )
+
             prompt = self.build_prompt(question, retrieved_context)
 
             # Instantiate RetrievalPipeline for compatibility and introspection
@@ -412,6 +435,7 @@ Grounded answer:
                 answer=answer,
                 sources=sources,
                 retrieved_chunks=len(retrieved_context.results),
+                retrieval_debug=self._format_retrieval_debug(retrieved_context.results),
                 response_time=elapsed,
             )
             self._validate_chat_response_lenient(response, show_sources=show_sources)
@@ -426,10 +450,15 @@ Grounded answer:
                     effective_style,
                     {
                         "answer":           response.answer,
-                        "sources":          [s.model_dump() for s in response.sources],
+                        "sources":          [s.model_dump() for s in retrieved_context.sources],
                         "retrieved_chunks": response.retrieved_chunks,
+                        "retrieval_debug":  [item.model_dump() for item in response.retrieval_debug],
                         "response_time":    elapsed,
                     },
+                    temperature=effective_temperature,
+                    top_k=effective_top_k,
+                    show_sources=show_sources,
+                    preferred_model=preferred_model,
                 )
             except Exception as cache_set_exc:
                 self.logger.debug("Cache SET failed (non-critical): %s", cache_set_exc)
@@ -622,6 +651,38 @@ Grounded answer:
             )
         return sources
 
+    def _format_retrieval_debug(
+        self,
+        results: List[Tuple[Document, float]],
+    ) -> List[RetrievalDebugItem]:
+        """Build compact retrieval diagnostics without affecting generation."""
+        debug_items: List[RetrievalDebugItem] = []
+        for index, (document, score) in enumerate(results):
+            metadata = document.metadata or {}
+            preview = " ".join(document.page_content.split())[:200]
+            debug_items.append(
+                RetrievalDebugItem(
+                    score=float(score),
+                    source=str(
+                        metadata.get("file_name")
+                        or metadata.get("source")
+                        or metadata.get("uploaded_filename")
+                        or "unknown"
+                    ),
+                    page=self._optional_int(
+                        metadata.get("page_number", metadata.get("page"))
+                    ),
+                    chunk_id=self._optional_str(
+                        metadata.get("chunk_id") or metadata.get("test_document_id")
+                    ),
+                    chunk_index=self._optional_int(
+                        metadata.get("chunk_index", metadata.get("source_document_index", index))
+                    ),
+                    preview=preview,
+                )
+            )
+        return debug_items
+
     @staticmethod
     def _validate_question(question: str) -> str:
         """Normalize and validate a question."""
@@ -663,7 +724,8 @@ Grounded answer:
     def _validate_retrieval_results(results: List[Tuple[Document, float]]) -> None:
         """Validate retrieved chunks and metadata integrity."""
         if not results:
-            raise ChatRetrievalError("No relevant chunks were retrieved")
+            return  # Empty results are now a valid state for graceful no-context handling
+
 
         required_metadata = {"source", "file_name"}
         for index, (document, score) in enumerate(results):

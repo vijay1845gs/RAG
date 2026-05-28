@@ -34,13 +34,16 @@ const asArray = (value) => (Array.isArray(value) ? value : [])
 
 const parseSources = (raw) => {
   if (!raw) return []
-  if (Array.isArray(raw)) return raw
+  if (typeof raw === 'object') return raw // Handles both arrays and objects natively
   try {
     return JSON.parse(raw)
   } catch {
     return []
   }
 }
+
+const chunkCount = (turn) =>
+  turn?.retrieved_chunks ?? turn?.retrieval_count ?? turn?.sources?.length ?? 0
 
 export default function History() {
   const { chatHistory } = useApp()
@@ -122,14 +125,30 @@ export default function History() {
 
   const historyItems = hasSessions
     ? sessionList.flatMap((session) =>
-        (session.messages || []).map((msg) => ({
-          ...msg,
-          sources: parseSources(msg.sources ?? msg.sources_json),
-          session_title: session.title,
+        (session.messages || []).map((msg) => {
+          const rawSources = parseSources(msg.sources ?? msg.sources_json)
+          let sourcesArray = rawSources
+          let parsedChunks = msg.retrieved_chunks
 
-          // normalized schema
-          session_id: session.id,
-        }))
+          // Fallback if sources was saved as an object containing retrieved_chunks
+          if (rawSources && !Array.isArray(rawSources) && typeof rawSources === 'object') {
+            sourcesArray = rawSources.sources || []
+            if (rawSources.retrieved_chunks !== undefined) {
+              parsedChunks = rawSources.retrieved_chunks
+            } else if (rawSources.retrieval_count !== undefined) {
+              parsedChunks = rawSources.retrieval_count
+            }
+          }
+
+          return {
+            ...msg,
+            sources: sourcesArray,
+            retrieved_chunks: parsedChunks,
+            retrieval_count: msg.retrieval_count,
+            session_title: session.title,
+            session_id: session.id,
+          }
+        })
       )
     : localHistory
 
@@ -291,7 +310,7 @@ export default function History() {
                     </span>
 
                     <span className="text-xs text-zinc-500">
-                      {turn.sources?.length ?? 0} sources
+                      {chunkCount(turn)} chunks
                     </span>
 
                     {turn.session_id && turn.session_id !== 'default' && (
@@ -353,7 +372,7 @@ export default function History() {
 
                         <span className="inline-flex items-center gap-1.5">
                           <FileText className="h-3.5 w-3.5" />
-                          {turn.sources?.length ?? 0} chunks
+                          {chunkCount(turn)} chunks
                         </span>
                       </div>
 

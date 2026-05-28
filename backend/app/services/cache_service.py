@@ -70,19 +70,31 @@ class ChatCacheService:
         question: str,
         rag_mode: str,
         response_style: str,
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
+        show_sources: Optional[bool] = None,
+        preferred_model: Optional[str] = None,
     ) -> str:
         """
         Build a cache key that covers all dimensions that affect the answer.
 
-        Changing collection, question, rag_mode (precise/creative), or
-        response_style (professional/technical/etc.) produces a different key.
+        Changing retrieval, generation, model identity, or source visibility
+        settings produces a different key.
         """
         # Hash the question to keep keys short and safe
         q_hash = hashlib.sha256(question.strip().lower().encode()).hexdigest()[:20]
         safe_col = (collection_id or "default").replace(":", "_")
         safe_mode = (rag_mode or "balanced").replace(":", "_")
         safe_style = (response_style or "professional").replace(":", "_")
-        return f"{self._PREFIX}:{safe_col}:{safe_mode}:{safe_style}:{q_hash}"
+        safe_temp = "none" if temperature is None else f"{float(temperature):.4g}"
+        safe_top_k = "none" if top_k is None else str(top_k)
+        safe_sources = "default" if show_sources is None else str(bool(show_sources)).lower()
+        safe_model = (preferred_model or "default").replace(":", "_")
+        return (
+            f"{self._PREFIX}:{safe_col}:{safe_mode}:{safe_style}:"
+            f"temp={safe_temp}:topk={safe_top_k}:sources={safe_sources}:"
+            f"model={safe_model}:{q_hash}"
+        )
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
@@ -92,6 +104,10 @@ class ChatCacheService:
         question: str,
         rag_mode: str = "balanced",
         response_style: str = "professional",
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
+        show_sources: Optional[bool] = None,
+        preferred_model: Optional[str] = None,
     ) -> Optional[dict]:
         """
         Return cached chat response dict or None on miss / Redis unavailable.
@@ -101,7 +117,16 @@ class ChatCacheService:
         if not self._ensure_client():
             return None
         try:
-            key = self._make_key(collection_id, question, rag_mode, response_style)
+            key = self._make_key(
+                collection_id,
+                question,
+                rag_mode,
+                response_style,
+                temperature,
+                top_k,
+                show_sources,
+                preferred_model,
+            )
             raw = self._client.get(key)
             if raw:
                 logger.debug("Cache HIT. key=%s", key)
@@ -119,6 +144,10 @@ class ChatCacheService:
         rag_mode: str,
         response_style: str,
         response_data: dict,
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
+        show_sources: Optional[bool] = None,
+        preferred_model: Optional[str] = None,
         ttl: Optional[int] = None,
     ) -> bool:
         """
@@ -129,7 +158,16 @@ class ChatCacheService:
         if not self._ensure_client():
             return False
         try:
-            key = self._make_key(collection_id, question, rag_mode, response_style)
+            key = self._make_key(
+                collection_id,
+                question,
+                rag_mode,
+                response_style,
+                temperature,
+                top_k,
+                show_sources,
+                preferred_model,
+            )
             effective_ttl = ttl if ttl is not None else self._ttl
             self._client.setex(key, effective_ttl, json.dumps(response_data, default=str))
             logger.debug("Cache SET. key=%s ttl=%ds", key, effective_ttl)

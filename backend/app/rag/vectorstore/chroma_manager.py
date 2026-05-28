@@ -248,8 +248,9 @@ class ChromaManager:
                     self.logger.error(error_msg)
                     raise DocumentAddError(error_msg) from batch_error
 
-            # Persist to disk
-            self.chroma_client.persist()
+            # Newer langchain_chroma persists automatically when a persist
+            # directory is configured; older versions still expose persist().
+            self._persist_if_supported()
 
             self.logger.info(
                 f"Successfully added {len(doc_ids)} documents. "
@@ -323,7 +324,7 @@ class ChromaManager:
             results = self.chroma_client.similarity_search_with_score(
                 query=query,
                 k=k,
-                where=metadata_filter,
+                filter=metadata_filter,
             )
 
             if not results:
@@ -452,8 +453,10 @@ class ChromaManager:
         """
         Persist the vector store to disk.
 
-        Ensures all changes are written to persistent storage. Called automatically
-        after add_documents, but can be called explicitly for safety.
+        Ensures all changes are written to persistent storage when the installed
+        Chroma wrapper exposes an explicit persist method. Newer
+        langchain_chroma versions persist automatically when a persist directory
+        is configured, so this method is a compatibility no-op there.
 
         Example:
             >>> manager = ChromaManager()
@@ -462,13 +465,23 @@ class ChromaManager:
         """
         try:
             self.logger.debug("Persisting vector store to disk")
-            self.chroma_client.persist()
+            self._persist_if_supported()
             self.logger.info("Vector store persisted successfully")
 
         except Exception as e:
             error_msg = f"Error persisting vector store: {type(e).__name__}: {str(e)}"
             self.logger.error(error_msg)
             raise ChromaDBError(error_msg) from e
+
+    def _persist_if_supported(self) -> None:
+        """Persist explicitly for older Chroma wrappers; no-op for newer ones."""
+        persist = getattr(self.chroma_client, "persist", None)
+        if callable(persist):
+            persist()
+        else:
+            self.logger.debug(
+                "Chroma client has no persist() method; relying on automatic persistence"
+            )
 
     def delete_documents_by_metadata(
         self,
@@ -509,8 +522,8 @@ class ChromaManager:
             # Use ChromaDB's native delete with where clause
             result = collection.delete(where=metadata_filter)
 
-            # Persist after deletion
-            self.chroma_client.persist()
+            # Persist after deletion when required by the installed wrapper.
+            self._persist_if_supported()
 
             deleted_count = len(result) if result else 0
             self.logger.info(f"Deleted {deleted_count} documents matching filter")

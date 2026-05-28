@@ -16,6 +16,12 @@ import {
 
 const asArray = (value) => (Array.isArray(value) ? value : [])
 
+const RAG_MODE_PRESETS = {
+  precise: { max_context_chunks: 3, temperature: 0.1 },
+  balanced: { max_context_chunks: 3, temperature: 0.3 },
+  creative: { max_context_chunks: 8, temperature: 0.8 },
+}
+
 /* ─── Toast ─── */
 function Toast({ status }) {
   const map = {
@@ -316,7 +322,7 @@ export default function SettingsPage() {
               ].map(m => (
                 <button
                   key={m.v}
-                  onClick={() => update({ rag_mode: m.v })}
+                  onClick={() => update({ rag_mode: m.v, ...RAG_MODE_PRESETS[m.v] })}
                   className={`p-3 rounded-xl border text-left transition-all ${settings.rag_mode === m.v ? 'border-white/30 bg-white/5' : 'border-zinc-800 bg-zinc-800/40 hover:border-zinc-700'}`}
                 >
                   <p className="text-lg mb-1">{m.emoji}</p>
