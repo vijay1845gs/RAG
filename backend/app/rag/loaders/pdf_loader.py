@@ -284,15 +284,100 @@ class PDFLoader:
     def _load_with_pypdf(self) -> List[Document]:
         """Load PDF pages without importing heavyweight LangChain loader modules."""
         from pypdf import PdfReader
+        import re
 
         reader = PdfReader(str(self.file_path))
         documents: List[Document] = []
+        
+        # Cleaning Stats
+        pages_removed = 0
+        references_removed = False
+        original_chars = 0
+        cleaned_chars = 0
+        
+        # 1. Extract raw pages to allow cross-page header/footer detection
+        raw_pages = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            original_chars += len(text)
+            raw_pages.append(text)
+            
+        # 2. Identify common headers and footers across the document
+        start_lines = {}
+        end_lines = {}
+        for text in raw_pages:
+            lines = [l.strip() for l in text.split('\n') if l.strip()]
+            if lines:
+                start_lines[lines[0]] = start_lines.get(lines[0], 0) + 1
+                end_lines[lines[-1]] = end_lines.get(lines[-1], 0) + 1
+                
+        # If a line appears at the start/end of >3 pages, it's likely a header/footer
+        common_headers = {line for line, count in start_lines.items() if count > 3 and len(line) < 100}
+        common_footers = {line for line, count in end_lines.items() if count > 3 and len(line) < 100}
 
-        for page_index, page in enumerate(reader.pages):
-            page_text = page.extract_text() or ""
+        # Regex for identifying References/Bibliography sections
+        ref_pattern = re.compile(r'^\s*(?:References|Bibliography|Works Cited)\s*$', re.IGNORECASE | re.MULTILINE)
+
+        # 3. Process and clean pages
+        for page_index, text in enumerate(raw_pages):
+            # A. Remove everything after References are detected
+            if references_removed:
+                pages_removed += 1
+                continue
+                
+            # B. Remove obvious title/cover pages
+            if page_index == 0:
+                text_len = len(text.strip())
+                if text_len < 800:
+                    upper_count = sum(1 for c in text if c.isupper())
+                    alpha_count = sum(1 for c in text if c.isalpha())
+                    # Skip if high uppercase ratio (title) or just very short
+                    if (alpha_count > 0 and (upper_count / alpha_count) > 0.3) or text_len < 300:
+                        pages_removed += 1
+                        self.logger.debug(f"[CLEANING] Removed likely title/cover page (Page {page_index})")
+                        continue
+                        
+            # A. Detect References/Bibliography section
+            ref_match = ref_pattern.search(text)
+            if ref_match:
+                text = text[:ref_match.start()]
+                references_removed = True
+                self.logger.debug(f"[CLEANING] Removed references section starting at Page {page_index}")
+                
+            # C. Remove noisy headers/footers and page numbers
+            lines = text.split('\n')
+            cleaned_lines = []
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                # Remove isolated page numbers
+                if re.match(r'^\d+$', stripped):
+                    continue
+                # Remove repeated headers (top of page)
+                if i < 3 and stripped in common_headers:
+                    continue
+                # Remove repeated footers (bottom of page)
+                if i > len(lines) - 4 and stripped in common_footers:
+                    continue
+                cleaned_lines.append(line)
+                
+            text = '\n'.join(cleaned_lines)
+            
+            # D. Normalize whitespace
+            # Remove excessive line breaks (3 or more -> 2)
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            # Remove trailing spaces before newlines
+            text = re.sub(r'[ \t]+\n', '\n', text)
+            text = text.strip()
+            
+            if not text:
+                pages_removed += 1
+                continue
+                
+            cleaned_chars += len(text)
+            
             documents.append(
                 Document(
-                    page_content=page_text,
+                    page_content=text,
                     metadata={
                         "source": str(self.file_path),
                         "file_name": self.file_path.name,
@@ -301,6 +386,14 @@ class PDFLoader:
                     },
                 )
             )
+
+        reduction = 100 * (1 - cleaned_chars / max(original_chars, 1)) if original_chars else 0
+        self.logger.info(
+            f"[CLEANING STATS] {self.file_path.name}: "
+            f"Pages removed: {pages_removed}, "
+            f"References removed: {references_removed}, "
+            f"Text reduction: {reduction:.1f}% ({original_chars} -> {cleaned_chars} chars)"
+        )
 
         return documents
 
